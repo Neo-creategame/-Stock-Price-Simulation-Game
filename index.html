@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2D 野球バッティングゲーム (拡張版)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: #1a1a1a;
+      color: #fff;
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    h1 { margin-bottom: 10px; font-size: 24px; }
+    #game-container {
+      position: relative;
+      border: 3px solid #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+    }
+    canvas { display: block; background-color: #388E3C; }
+    #ui {
+      margin-top: 15px;
+      display: flex;
+      gap: 20px;
+      font-size: 18px;
+      font-weight: bold;
+    }
+    .btn-pitch {
+      margin-top: 15px;
+      padding: 10px 24px;
+      font-size: 16px;
+      font-weight: bold;
+      color: #fff;
+      background-color: #2196F3;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .btn-pitch:hover { background-color: #0b7dda; }
+    .instructions { margin-top: 15px; font-size: 14px; color: #ccc; }
+  </style>
+</head>
+<body>
+
+  <h1>2D バッティングゲーム</h1>
+
+  <div id="game-container">
+    <canvas id="gameCanvas" width="400" height="600"></canvas>
+  </div>
+
+  <div id="ui">
+    <div>スコア: <span id="score">0</span></div>
+    <div>判定: <span id="result">-</span></div>
+  </div>
+
+  <button class="btn-pitch" id="pitchBtn">投球開始</button>
+
+  <div class="instructions">
+    [操作方法] 画面クリック または <b>スペースキー</b>（投球 / スイング）
+  </div>
+
+  <script>
+    // ==========================================
+    // ⚙️ 1. カスタマイズ設定 (CONFIG)
+    // ここを変更するだけでゲームの挙動を簡単に調整できます
+    // ==========================================
+    const CONFIG = {
+      canvas: { width: 400, height: 600 },
+      pitcher: { x: 200, y: 120 },
+      homePlate: { x: 200, y: 520 },
+      ball: {
+        radius: 8,
+        minSpeed: 4,     // 最小球速
+        maxSpeed: 7,     // 最大球速
+        curveRange: 1.5   // 横方向の変化量
+      },
+      hitZone: {
+        perfect: 12,     // ジャストミート判定距離 (px)
+        good: 35,        // ヒット判定距離 (px)
+        foul: 60         // 空振り・かすり判定距離 (px)
+      },
+      score: {
+        homerun: 100,
+        hit: 30
+      }
+    };
+
+    // ==========================================
+    // ⚾ 2. ボールクラス (Ball)
+    // ==========================================
+    class Ball {
+      constructor() {
+        this.reset();
+      }
+
+      reset() {
+        this.x = CONFIG.pitcher.x;
+        this.y = CONFIG.pitcher.y;
+        this.vx = 0;
+        this.vy = 0;
+        this.isHit = false;
+      }
+
+      pitch() {
+        this.reset();
+        // 球速と変化幅の計算
+        this.vy = CONFIG.ball.minSpeed + Math.random() * (CONFIG.ball.maxSpeed - CONFIG.ball.minSpeed);
+        this.vx = (Math.random() - 0.5) * CONFIG.ball.curveRange;
+      }
+
+      update() {
+        this.x += this.vx;
+        this.y += this.vy;
+      }
+
+      draw(ctx) {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, CONFIG.ball.radius, 0, Math.PI * 2);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fill();
+        ctx.strokeStyle = '#FF0000';
+        ctx.stroke();
+      }
+    }
+
+    // ==========================================
+    // 🏏 3. バットクラス (Bat)
+    // ==========================================
+    class Bat {
+      constructor() {
+        this.baseAngle = -0.2;
+        this.angle = this.baseAngle;
+        this.isSwinging = false;
+        this.progress = 0;
+        this.speed = 0.2; // スイングの速さ
+      }
+
+      swing() {
+        if (this.isSwinging) return false;
+        this.isSwinging = true;
+        this.progress = 0;
+        return true;
+      }
+
+      update() {
+        if (!this.isSwinging) return;
+
+        this.progress += this.speed;
+        this.angle = this.baseAngle - Math.sin(this.progress) * 2.0;
+
+        if (this.progress >= Math.PI) {
+          this.isSwinging = false;
+          this.angle = this.baseAngle;
+        }
+      }
+
+      draw(ctx) {
+        ctx.save();
+        ctx.translate(CONFIG.homePlate.x + 30, CONFIG.homePlate.y);
+        ctx.rotate(this.angle);
+        ctx.fillStyle = '#DEB887';
+        ctx.fillRect(-5, -45, 10, 50);
+        ctx.restore();
+      }
+    }
+
+    // ==========================================
+    // 🎮 4. メインゲームロジック
+    // ==========================================
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const resultEl = document.getElementById('result');
+    const pitchBtn = document.getElementById('pitchBtn');
+
+    const ball = new Ball();
+    const bat = new Bat();
+
+    let score = 0;
+    let state = 'IDLE'; // IDLE, PITCHING, HIT, OUT
+
+    // 背景描画（グランド・ベース・ピッチャーマウンド）
+    function drawField() {
+      // 外野
+      ctx.fillStyle = '#388E3C';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // 内野 (土)
+      ctx.beginPath();
+      ctx.moveTo(canvas.width / 2, 350);
+      ctx.lineTo(350, CONFIG.homePlate.y + 20);
+      ctx.lineTo(canvas.width / 2, CONFIG.homePlate.y + 60);
+      ctx.lineTo(50, CONFIG.homePlate.y + 20);
+      ctx.closePath();
+      ctx.fillStyle = '#D84315';
+      ctx.fill();
+
+      // ホームベース
+      ctx.beginPath();
+      ctx.moveTo(CONFIG.homePlate.x - 12, CONFIG.homePlate.y);
+      ctx.lineTo(CONFIG.homePlate.x + 12, CONFIG.homePlate.y);
+      ctx.lineTo(CONFIG.homePlate.x + 12, CONFIG.homePlate.y + 12);
+      ctx.lineTo(CONFIG.homePlate.x, CONFIG.homePlate.y + 20);
+      ctx.lineTo(CONFIG.homePlate.x - 12, CONFIG.homePlate.y + 12);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fill();
+
+      // ピッチャーマウンド
+      ctx.beginPath();
+      ctx.arc(CONFIG.pitcher.x, CONFIG.pitcher.y, 20, 0, Math.PI * 2);
+      ctx.fillStyle = '#D84315';
+      ctx.fill();
+    }
+
+    // 投球アクション
+    function startPitch() {
+      if (state === 'PITCHING') return;
+      state = 'PITCHING';
+      resultEl.textContent = '投手構えた...';
+      ball.pitch();
+    }
+
+    // 打撃判定アクション
+    function handleSwing() {
+      if (!bat.swing()) return;
+
+      if (state === 'PITCHING') {
+        const diffY = Math.abs(ball.y - CONFIG.homePlate.y);
+
+        if (diffY < CONFIG.hitZone.good) {
+          // ヒット成立
+          state = 'HIT';
+          ball.isHit = true;
+          ball.vy = -(6 + Math.random() * 6);
+          ball.vx = (Math.random() - 0.5) * 8;
+
+          if (diffY < CONFIG.hitZone.perfect) {
+            resultEl.textContent = 'ジャストミート！ 💥';
+          } else {
+            resultEl.textContent = 'ナイスヒット！ ⚾';
+          }
+        } else if (diffY < CONFIG.hitZone.foul) {
+          state = 'OUT';
+          resultEl.textContent = '空振り！';
+        }
+      }
+    }
+
+    // ゲームループ
+    function gameLoop() {
+      // 1. 状態更新
+      bat.update();
+
+      if (state === 'PITCHING') {
+        ball.update();
+        if (ball.y > canvas.height) {
+          state = 'OUT';
+          resultEl.textContent = 'ストライク / 見逃し';
+        }
+      } else if (state === 'HIT') {
+        ball.update();
+        // 柵越え判定 (フェンス超えでホームラン)
+        if (ball.y < 30) {
+          state = 'IDLE';
+          score += CONFIG.score.homerun;
+          scoreEl.textContent = score;
+          resultEl.textContent = 'ホームラン！ 🎉';
+        } else if (ball.x < 0 || ball.x > canvas.width || ball.y > canvas.height) {
+          state = 'IDLE';
+          score += CONFIG.score.hit;
+          scoreEl.textContent = score;
+          resultEl.textContent = 'ヒット！ 👏';
+        }
+      }
+
+      // 2. 描画
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawField();
+      bat.draw(ctx);
+      if (state === 'PITCHING' || state === 'HIT' || state === 'OUT') {
+        ball.draw(ctx);
+      }
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    // イベント割り当て
+    function triggerAction() {
+      if (state === 'IDLE' || state === 'OUT') {
+        startPitch();
+      } else {
+        handleSwing();
+      }
+    }
+
+    pitchBtn.addEventListener('click', startPitch);
+    canvas.addEventListener('click', triggerAction);
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        triggerAction();
+      }
+    });
+
+    // ゲーム開始
+    gameLoop();
+  </script>
+</body>
+</html>
